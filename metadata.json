@@ -1,0 +1,5 @@
+{
+  "name": "React Dino Game",
+  "description": "A simple dinosaur jumping game built with React and TypeScript. Press Space or Arrow Up to jump and Arrow Down to duck, avoiding obstacles to score points.",
+  "requestFramePermissions": []
+}
