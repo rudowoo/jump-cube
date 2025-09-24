@@ -25,10 +25,40 @@ const App = () => {
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [speed, setSpeed] = useState(INITIAL_SPEED);
+  const [isMuted, setIsMuted] = useState(false);
 
-  const gameLoopRef = useRef<number>();
+  // Fix: Initialize useRef with null. The overload for useRef() without arguments
+  // might not be available in older TypeScript/React types versions, which would
+  // cause the "Expected 1 arguments, but got 0" error.
+  const gameLoopRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
   const nextObstacleTimeRef = useRef<number>(0);
+  const lastScoreMilestone = useRef(0);
+
+  // Sound Refs
+  // Fix: The type for sound refs must include `null` because they are conditionally
+  // initialized with `null` when `Audio` is not available.
+  const jumpSoundRef = useRef<HTMLAudioElement | null>(typeof Audio !== "undefined" ? new Audio('https://actions.google.com/sounds/v1/sports/ball_bounce.ogg') : null);
+  const scoreSoundRef = useRef<HTMLAudioElement | null>(typeof Audio !== "undefined" ? new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg') : null);
+  const gameOverSoundRef = useRef<HTMLAudioElement | null>(typeof Audio !== "undefined" ? new Audio('https://actions.google.com/sounds/v1/losses/negative_beeps.ogg') : null);
+  const duckSoundRef = useRef<HTMLAudioElement | null>(typeof Audio !== "undefined" ? new Audio('https://actions.google.com/sounds/v1/swoosh/swoosh_2.ogg') : null);
+
+  const playSound = useCallback((sound: 'jump' | 'score' | 'gameOver' | 'duck') => {
+    if (isMuted) return;
+
+    let soundToPlay: HTMLAudioElement | null = null;
+    switch(sound) {
+      case 'jump': soundToPlay = jumpSoundRef.current; break;
+      case 'score': soundToPlay = scoreSoundRef.current; break;
+      case 'gameOver': soundToPlay = gameOverSoundRef.current; break;
+      case 'duck': soundToPlay = duckSoundRef.current; break;
+    }
+    
+    if (soundToPlay) {
+        soundToPlay.currentTime = 0;
+        soundToPlay.play().catch(error => console.error("Error playing sound:", error));
+    }
+  }, [isMuted]);
 
   useEffect(() => {
     const savedHighScore = localStorage.getItem('dinoHighScore');
@@ -37,19 +67,20 @@ const App = () => {
     }
   }, []);
 
-  const getDinoDimensions = useCallback(() => {
-    return dino.status === 'ducking' ? DINO_DUCKING_DIMENSIONS : DINO_RUNNING_DIMENSIONS;
-  }, [dino.status]);
+  const getDinoDimensions = useCallback((status: DinosaurStatus) => {
+    return status === 'ducking' ? DINO_DUCKING_DIMENSIONS : DINO_RUNNING_DIMENSIONS;
+  }, []);
 
   const resetGame = useCallback(() => {
     setGameState('running');
     setDino({ y: GROUND_Y - DINO_RUNNING_DIMENSIONS.height, vy: 0, status: 'running' });
     setObstacles([]);
     setScore(0);
+    lastScoreMilestone.current = 0;
     setSpeed(INITIAL_SPEED);
     nextObstacleTimeRef.current = random(OBSTACLE_INTERVAL_MIN, OBSTACLE_INTERVAL_MAX);
     lastTimeRef.current = 0;
-  }, [setGameState, setDino, setObstacles, setScore, setSpeed]);
+  }, []);
 
   const gameLoop = useCallback((time: number) => {
     if (lastTimeRef.current === 0) {
@@ -61,55 +92,41 @@ const App = () => {
     const deltaTime = (time - lastTimeRef.current) / 1000;
     lastTimeRef.current = time;
 
-    // Update Dinosaur
-    setDino(prevDino => {
-      const dimensions = getDinoDimensions();
-      let newVy = prevDino.vy + GRAVITY * deltaTime;
-      let newY = prevDino.y + newVy * deltaTime;
+    const currentDinoDimensions = getDinoDimensions(dino.status);
+    let newDinoVy = dino.vy + GRAVITY * deltaTime;
+    let newDinoY = dino.y + newDinoVy * deltaTime;
 
-      const groundPosition = GROUND_Y - dimensions.height;
-      if (newY >= groundPosition) {
-        newY = groundPosition;
-        newVy = 0;
-      }
-      return { ...prevDino, y: newY, vy: newVy };
-    });
+    const groundPosition = GROUND_Y - currentDinoDimensions.height;
+    if (newDinoY >= groundPosition) {
+      newDinoY = groundPosition;
+      newDinoVy = 0;
+    }
 
-    // Update Obstacles
-    setObstacles(prevObstacles => {
-      return prevObstacles
-        .map(obstacle => ({ ...obstacle, x: obstacle.x - speed * deltaTime }))
-        .filter(obstacle => obstacle.x > -obstacle.width);
-    });
+    let newObstacles = obstacles
+      .map(obstacle => ({ ...obstacle, x: obstacle.x - speed * deltaTime }))
+      .filter(obstacle => obstacle.x > -obstacle.width);
 
-    // Generate new obstacles
     nextObstacleTimeRef.current -= deltaTime * 1000;
     if (nextObstacleTimeRef.current <= 0) {
       const obstacleTypes = Object.keys(OBSTACLE_CONFIGS);
       const type = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
       const config = OBSTACLE_CONFIGS[type];
-      setObstacles(prev => [...prev, {
+      newObstacles.push({
         ...config,
         x: GAME_WIDTH,
         type,
-      }]);
+      });
       nextObstacleTimeRef.current = random(OBSTACLE_INTERVAL_MIN, OBSTACLE_INTERVAL_MAX) / (speed / INITIAL_SPEED);
     }
     
-    // Update score and speed
-    setScore(prev => prev + speed * deltaTime / 10);
-    setSpeed(prev => prev + SPEED_INCREASE_RATE * deltaTime);
-
-    // Collision detection
-    const dinoDimensions = getDinoDimensions();
     const dinoHitbox = {
       x: 50,
-      y: dino.y,
-      width: dinoDimensions.width,
-      height: dinoDimensions.height
+      y: newDinoY,
+      width: currentDinoDimensions.width,
+      height: currentDinoDimensions.height
     };
 
-    for (const obstacle of obstacles) {
+    for (const obstacle of newObstacles) {
       const obstacleHitbox = {
         x: obstacle.x,
         y: GROUND_Y - obstacle.height,
@@ -127,8 +144,13 @@ const App = () => {
       }
     }
 
+    setDino(prev => ({ ...prev, y: newDinoY, vy: newDinoVy }));
+    setObstacles(newObstacles);
+    setScore(prev => prev + speed * deltaTime / 10);
+    setSpeed(prev => prev + SPEED_INCREASE_RATE * deltaTime);
+
     gameLoopRef.current = requestAnimationFrame(gameLoop);
-  }, [dino.y, getDinoDimensions, obstacles, speed, setGameState]);
+  }, [dino, getDinoDimensions, obstacles, speed]);
 
 
   useEffect(() => {
@@ -140,6 +162,7 @@ const App = () => {
         cancelAnimationFrame(gameLoopRef.current);
       }
       if (gameState === 'gameOver') {
+        playSound('gameOver');
         const finalScore = Math.floor(score);
         if (finalScore > highScore) {
           setHighScore(finalScore);
@@ -152,21 +175,40 @@ const App = () => {
         cancelAnimationFrame(gameLoopRef.current);
       }
     };
-  }, [gameState, gameLoop, score, highScore]);
+  }, [gameState, gameLoop, score, highScore, playSound]);
+  
+  useEffect(() => {
+      const currentMilestone = Math.floor(score / 100);
+      if (currentMilestone > 0 && currentMilestone > lastScoreMilestone.current) {
+        playSound('score');
+        lastScoreMilestone.current = currentMilestone;
+      }
+  }, [score, playSound]);
+
+  const jump = useCallback(() => {
+    setDino(prevDino => {
+      const dimensions = getDinoDimensions(prevDino.status);
+      const isOnGround = prevDino.y >= GROUND_Y - dimensions.height;
+      if (isOnGround) {
+        playSound('jump');
+        return { ...prevDino, vy: -JUMP_FORCE };
+      }
+      return prevDino;
+    });
+  }, [getDinoDimensions, playSound]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (gameState === 'running') {
         if ((e.code === 'Space' || e.code === 'ArrowUp')) {
-          setDino(prevDino => {
-            const isOnGround = prevDino.y >= GROUND_Y - getDinoDimensions().height;
-            if(isOnGround) {
-               return { ...prevDino, vy: -JUMP_FORCE };
-            }
-            return prevDino;
-          });
+          jump();
         } else if (e.code === 'ArrowDown') {
-          setDino(prevDino => ({ ...prevDino, status: 'ducking' }));
+          setDino(prevDino => {
+            if (prevDino.status !== 'ducking') {
+              playSound('duck');
+            }
+            return { ...prevDino, status: 'ducking' };
+          });
         }
       } else {
          if (e.code === 'Space' || e.code === 'ArrowUp') {
@@ -180,25 +222,54 @@ const App = () => {
         setDino(prevDino => ({ ...prevDino, status: 'running' }));
       }
     };
+    
+    const handleTouchStart = (e: TouchEvent) => {
+        e.preventDefault();
+        if (gameState === 'running') {
+             jump();
+        } else {
+            resetGame();
+        }
+    };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('touchstart', handleTouchStart);
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('touchstart', handleTouchStart);
     };
-  }, [gameState, resetGame, getDinoDimensions]);
+  }, [gameState, resetGame, jump, playSound]);
 
-  const dinoDimensions = getDinoDimensions();
+  const dinoDimensions = getDinoDimensions(dino.status);
   const groundPosition = GROUND_Y - dinoDimensions.height;
   const dinoYPos = dino.status === 'ducking' && dino.y >= groundPosition ? groundPosition : dino.y;
   
   return (
     <div className="flex items-center justify-center min-h-screen bg-gray-200 font-mono">
       <div 
-        className="relative bg-white overflow-hidden border-2 border-gray-400"
+        className="relative bg-white overflow-hidden border-2 border-gray-400 select-none"
         style={{ width: GAME_WIDTH, height: GAME_HEIGHT }}
       >
+        {/* Mute Button */}
+        <button 
+          onClick={() => setIsMuted(prev => !prev)} 
+          className="absolute top-2 left-2 text-gray-600 z-10 p-1"
+          aria-label={isMuted ? "Unmute sounds" : "Mute sounds"}
+        >
+          {isMuted ? (
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+            </svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+            </svg>
+          )}
+        </button>
+        
         {/* Ground */}
         <div 
           className="absolute bottom-0 left-0 w-full bg-gray-500" 
@@ -242,7 +313,7 @@ const App = () => {
             <h2 className="text-4xl font-bold text-gray-700">
               {gameState === 'gameOver' ? 'Game Over' : 'Dino Game'}
             </h2>
-            <p className="mt-4 text-lg text-gray-600">Press Space or Up Arrow to start</p>
+            <p className="mt-4 text-lg text-gray-600">Press Space/Up Arrow or Tap to start</p>
           </div>
         )}
       </div>
